@@ -5,17 +5,8 @@ declare(strict_types=1);
 namespace League\Flysystem\AdapterTestUtilities;
 
 use const PHP_EOL;
-use Generator;
+use League\Flysystem\AdapterInterface;
 use League\Flysystem\Config;
-use League\Flysystem\DirectoryAttributes;
-use League\Flysystem\FileAttributes;
-use League\Flysystem\FilesystemAdapter;
-use League\Flysystem\StorageAttributes;
-use League\Flysystem\UnableToMoveFile;
-use League\Flysystem\UnableToReadFile;
-use League\Flysystem\UnableToRetrieveMetadata;
-use League\Flysystem\UnableToSetVisibility;
-use League\Flysystem\Visibility;
 use PHPUnit\Framework\TestCase;
 use Throwable;
 use function file_get_contents;
@@ -28,7 +19,7 @@ abstract class FilesystemAdapterTestCase extends TestCase
     use RetryOnTestException;
 
     /**
-     * @var FilesystemAdapter
+     * @var AdapterInterface
      */
     protected static $adapter;
 
@@ -42,11 +33,11 @@ abstract class FilesystemAdapterTestCase extends TestCase
         static::$adapter = null;
     }
 
-    abstract protected static function createFilesystemAdapter(): FilesystemAdapter;
+    abstract protected static function createFilesystemAdapter(): AdapterInterface;
 
-    public function adapter(): FilesystemAdapter
+    public function adapter(): AdapterInterface
     {
-        if ( ! static::$adapter instanceof FilesystemAdapter) {
+        if ( ! static::$adapter instanceof AdapterInterface) {
             static::$adapter = static::createFilesystemAdapter();
         }
 
@@ -64,7 +55,7 @@ abstract class FilesystemAdapterTestCase extends TestCase
         $this->adapter();
     }
 
-    protected function useAdapter(FilesystemAdapter $adapter): FilesystemAdapter
+    protected function useAdapter(AdapterInterface $adapter): AdapterInterface
     {
         static::$adapter = $adapter;
         $this->isUsingCustomAdapter = true;
@@ -97,12 +88,11 @@ abstract class FilesystemAdapterTestCase extends TestCase
             return;
         }
 
-        /** @var StorageAttributes $item */
         foreach ($adapter->listContents('', false) as $item) {
-            if ($item->isDir()) {
-                $adapter->deleteDirectory($item->path());
+            if ($item['type'] === 'dir') {
+                $adapter->deleteDir($item['path']);
             } else {
-                $adapter->delete($item->path());
+                $adapter->delete($item['path']);
             }
         }
     }
@@ -124,7 +114,7 @@ abstract class FilesystemAdapterTestCase extends TestCase
             $adapter = $this->adapter();
 
             $adapter->write('path.txt', 'contents', new Config());
-            $fileExists = $adapter->fileExists('path.txt');
+            $fileExists = $adapter->has('path.txt');
             $contents = $adapter->read('path.txt');
 
             $this->assertTrue($fileExists);
@@ -142,7 +132,7 @@ abstract class FilesystemAdapterTestCase extends TestCase
             $writeStream = stream_with_contents('contents');
 
             $adapter->writeStream('path.txt', $writeStream, new Config());
-            $fileExists = $adapter->fileExists('path.txt');
+            $fileExists = $adapter->has('path.txt');
 
             $this->assertTrue($fileExists);
         });
@@ -164,7 +154,7 @@ abstract class FilesystemAdapterTestCase extends TestCase
         });
     }
 
-    public function filenameProvider(): Generator
+    public function filenameProvider(): iterable
     {
         yield "a path with square brackets in filename 1" => ["some/file[name].txt"];
         yield "a path with square brackets in filename 2" => ["some/file[0].txt"];
@@ -192,7 +182,7 @@ abstract class FilesystemAdapterTestCase extends TestCase
             $writeStream = stream_with_contents('');
 
             $adapter->writeStream('path.txt', $writeStream, new Config());
-            $fileExists = $adapter->fileExists('path.txt');
+            $fileExists = $adapter->has('path.txt');
 
             $this->assertTrue($fileExists);
 
@@ -224,11 +214,11 @@ abstract class FilesystemAdapterTestCase extends TestCase
 
         $this->runScenario(function () {
             $readStream = $this->adapter()->readStream('path.txt');
-            $contents = stream_get_contents($readStream);
+            $contents = stream_get_contents($readStream['stream']);
 
-            $this->assertIsResource($readStream);
+            $this->assertIsResource($readStream['stream']);
             $this->assertEquals('contents', $contents);
-            fclose($readStream);
+            fclose($readStream['stream']);
         });
     }
 
@@ -238,15 +228,15 @@ abstract class FilesystemAdapterTestCase extends TestCase
     public function overwriting_a_file(): void
     {
         $this->runScenario(function () {
-            $this->givenWeHaveAnExistingFile('path.txt', 'contents', ['visibility' => Visibility::PUBLIC]);
+            $this->givenWeHaveAnExistingFile('path.txt', 'contents', ['visibility' => 'public']);
             $adapter = $this->adapter();
 
-            $adapter->write('path.txt', 'new contents', new Config(['visibility' => Visibility::PRIVATE]));
+            $adapter->write('path.txt', 'new contents', new Config(['visibility' => 'private']));
 
             $contents = $adapter->read('path.txt');
             $this->assertEquals('new contents', $contents);
-            $visibility = $adapter->visibility('path.txt')->visibility();
-            $this->assertEquals(Visibility::PRIVATE, $visibility);
+            $visibility = $adapter->getVisibility('path.txt')['visibility'];
+            $this->assertEquals('private', $visibility);
         });
     }
 
@@ -260,7 +250,7 @@ abstract class FilesystemAdapterTestCase extends TestCase
             $this->givenWeHaveAnExistingFile('path.txt', 'contents');
 
             $adapter->delete('path.txt');
-            $fileExists = $adapter->fileExists('path.txt');
+            $fileExists = $adapter->has('path.txt');
 
             $this->assertFalse($fileExists);
         });
@@ -275,22 +265,18 @@ abstract class FilesystemAdapterTestCase extends TestCase
             $this->givenWeHaveAnExistingFile('some/0-path.txt', 'contents');
             $this->givenWeHaveAnExistingFile('some/1-nested/path.txt', 'contents');
 
-            $listing = $this->adapter()->listContents('some', false);
-            /** @var StorageAttributes[] $items */
-            $items = iterator_to_array($listing);
+            $items = $this->adapter()->listContents('some', false);
 
-            $this->assertInstanceOf(Generator::class, $listing);
-            $this->assertContainsOnlyInstancesOf(StorageAttributes::class, $items);
-
+            $this->assertIsArray($items);
             $this->assertCount(2, $items, $this->formatIncorrectListingCount($items));
 
             // Order of entries is not guaranteed
             [$fileIndex, $directoryIndex] = $items[0]->isFile() ? [0, 1] : [1, 0];
 
-            $this->assertEquals('some/0-path.txt', $items[$fileIndex]->path());
-            $this->assertEquals('some/1-nested', $items[$directoryIndex]->path());
-            $this->assertTrue($items[$fileIndex]->isFile());
-            $this->assertTrue($items[$directoryIndex]->isDir());
+            $this->assertEquals('some/0-path.txt', $items[$fileIndex]['path']);
+            $this->assertEquals('some/1-nested', $items[$directoryIndex]['path']);
+            $this->assertTrue($items[$fileIndex]['type'] === 'file');
+            $this->assertTrue($items[$directoryIndex]['type'] === 'dir');
         });
     }
 
@@ -301,12 +287,10 @@ abstract class FilesystemAdapterTestCase extends TestCase
     {
         $this->runScenario(function () {
             $adapter = $this->adapter();
-            $adapter->createDirectory('path', new Config());
+            $adapter->createDir('path', new Config());
             $adapter->write('path/file.txt', 'string', new Config());
 
-            $listing = $adapter->listContents('', true);
-            /** @var StorageAttributes[] $items */
-            $items = iterator_to_array($listing);
+            $items = $adapter->listContents('', true);
             $this->assertCount(2, $items, $this->formatIncorrectListingCount($items));
         });
     }
@@ -315,9 +299,8 @@ abstract class FilesystemAdapterTestCase extends TestCase
     {
         $message = "Incorrect number of items returned.\nThe listing contains:\n\n";
 
-        /** @var StorageAttributes $item */
         foreach ($items as $item) {
-            $message .= "- {$item->path()}\n";
+            $message .= "- {$item['path']}\n";
         }
 
         return $message . PHP_EOL;
@@ -339,9 +322,9 @@ abstract class FilesystemAdapterTestCase extends TestCase
         $this->givenWeHaveAnExistingFile('path.txt', 'contents');
 
         $this->runScenario(function () use ($adapter) {
-            $attributes = $adapter->fileSize('path.txt');
-            $this->assertInstanceOf(FileAttributes::class, $attributes);
-            $this->assertEquals(8, $attributes->fileSize());
+            $attributes = $adapter->getSize('path.txt');
+            $this->assertIsArray($attributes);
+            $this->assertEquals(8, $attributes['size']);
         });
     }
 
@@ -352,17 +335,17 @@ abstract class FilesystemAdapterTestCase extends TestCase
     {
         $this->runScenario(function () {
             $adapter = $this->adapter();
-            $this->givenWeHaveAnExistingFile('path.txt', 'contents', [Config::OPTION_VISIBILITY => Visibility::PUBLIC]);
+            $this->givenWeHaveAnExistingFile('path.txt', 'contents', ['visibility' => 'public']);
 
-            $this->assertEquals(Visibility::PUBLIC, $adapter->visibility('path.txt')->visibility());
+            $this->assertEquals('public', $adapter->getVisibility('path.txt')['visibility']);
 
-            $adapter->setVisibility('path.txt', Visibility::PRIVATE);
+            $adapter->setVisibility('path.txt', 'private');
 
-            $this->assertEquals(Visibility::PRIVATE, $adapter->visibility('path.txt')->visibility());
+            $this->assertEquals('private', $adapter->getVisibility('path.txt')['visibility']);
 
-            $adapter->setVisibility('path.txt', Visibility::PUBLIC);
+            $adapter->setVisibility('path.txt', 'public');
 
-            $this->assertEquals(Visibility::PUBLIC, $adapter->visibility('path.txt')->visibility());
+            $this->assertEquals('public', $adapter->getVisibility('path.txt')['visibility']);
         });
     }
 
@@ -371,13 +354,13 @@ abstract class FilesystemAdapterTestCase extends TestCase
      */
     public function fetching_file_size_of_a_directory(): void
     {
-        $this->expectException(UnableToRetrieveMetadata::class);
-
         $adapter = $this->adapter();
 
         $this->runScenario(function () use ($adapter) {
-            $adapter->createDirectory('path', new Config());
-            $adapter->fileSize('path/');
+            $adapter->createDir('path', new Config());
+            $size = $adapter->getSize('path/');
+
+            $this->assertFalse($size);
         });
     }
 
@@ -386,10 +369,10 @@ abstract class FilesystemAdapterTestCase extends TestCase
      */
     public function fetching_file_size_of_non_existing_file(): void
     {
-        $this->expectException(UnableToRetrieveMetadata::class);
-
         $this->runScenario(function () {
-            $this->adapter()->fileSize('non-existing-file.txt');
+            $size = $this->adapter()->getSize('non-existing-file.txt');
+
+            $this->assertFalse($size);
         });
     }
 
@@ -398,10 +381,10 @@ abstract class FilesystemAdapterTestCase extends TestCase
      */
     public function fetching_last_modified_of_non_existing_file(): void
     {
-        $this->expectException(UnableToRetrieveMetadata::class);
-
         $this->runScenario(function () {
-            $this->adapter()->lastModified('non-existing-file.txt');
+            $timestamp = $this->adapter()->getTimestamp('non-existing-file.txt');
+
+            $this->assertFalse($timestamp);
         });
     }
 
@@ -410,10 +393,10 @@ abstract class FilesystemAdapterTestCase extends TestCase
      */
     public function fetching_visibility_of_non_existing_file(): void
     {
-        $this->expectException(UnableToRetrieveMetadata::class);
-
         $this->runScenario(function () {
-            $this->adapter()->visibility('non-existing-file.txt');
+            $visibility = $this->adapter()->getVisibility('non-existing-file.txt');
+
+            $this->assertFalse($visibility);
         });
     }
 
@@ -425,9 +408,9 @@ abstract class FilesystemAdapterTestCase extends TestCase
         $this->runScenario(function () {
             $this->givenWeHaveAnExistingFile('file.svg', file_get_contents(__DIR__ . '/test_files/flysystem.svg'));
 
-            $mimetype = $this->adapter()->mimeType('file.svg')->mimeType();
+            $attributes = $this->adapter()->getMimetype('file.svg');
 
-            $this->assertStringStartsWith('image/svg', $mimetype);
+            $this->assertStringStartsWith('image/svg', $attributes['mimetype']);
         });
     }
 
@@ -436,10 +419,10 @@ abstract class FilesystemAdapterTestCase extends TestCase
      */
     public function fetching_mime_type_of_non_existing_file(): void
     {
-        $this->expectException(UnableToRetrieveMetadata::class);
-
         $this->runScenario(function () {
-            $this->adapter()->mimeType('non-existing-file.txt');
+            $attributes = $this->adapter()->getMimetype('non-existing-file.txt');
+
+            $this->assertFalse($attributes);
         });
     }
 
@@ -453,10 +436,10 @@ abstract class FilesystemAdapterTestCase extends TestCase
             file_get_contents(__DIR__ . '/test_files/unknown-mime-type.md5')
         );
 
-        $this->expectException(UnableToRetrieveMetadata::class);
-
         $this->runScenario(function () {
-            $this->adapter()->mimeType('unknown-mime-type.md5');
+            $attributes = $this->adapter()->getMimetype('unknown-mime-type.md5');
+
+            $this->assertFalse($attributes);
         });
     }
 
@@ -469,7 +452,7 @@ abstract class FilesystemAdapterTestCase extends TestCase
         $this->givenWeHaveAnExistingFile('path2.txt');
 
         $this->runScenario(function () {
-            $contents = iterator_to_array($this->adapter()->listContents('', true));
+            $contents = $this->adapter()->listContents('', true);
 
             $this->assertCount(2, $contents);
         });
@@ -490,9 +473,9 @@ abstract class FilesystemAdapterTestCase extends TestCase
             };
             $readStream = $adapter->readStream('path.txt');
 
-            $this->assertIsResource($readStream);
-            $contents = stream_get_contents($readStream);
-            fclose($readStream);
+            $this->assertIsResource($readStream['stream']);
+            $contents = stream_get_contents($readStream['stream']);
+            fclose($readStream['stream']);
             $this->assertEquals('contents', $contents);
         });
     }
@@ -502,10 +485,10 @@ abstract class FilesystemAdapterTestCase extends TestCase
      */
     public function setting_visibility_on_a_file_that_does_not_exist(): void
     {
-        $this->expectException(UnableToSetVisibility::class);
-
         $this->runScenario(function () {
-            $this->adapter()->setVisibility('path.txt', Visibility::PRIVATE);
+            $attributes = $this->adapter()->setVisibility('path.txt', 'private');
+
+            $this->assertFalse($attributes);
         });
     }
 
@@ -519,14 +502,14 @@ abstract class FilesystemAdapterTestCase extends TestCase
             $adapter->write(
                 'source.txt',
                 'contents to be copied',
-                new Config([Config::OPTION_VISIBILITY => Visibility::PUBLIC])
+                new Config(['visibility' => 'public'])
             );
 
-            $adapter->copy('source.txt', 'destination.txt', new Config());
+            $adapter->copy('source.txt', 'destination.txt');
 
-            $this->assertTrue($adapter->fileExists('source.txt'));
-            $this->assertTrue($adapter->fileExists('destination.txt'));
-            $this->assertEquals(Visibility::PUBLIC, $adapter->visibility('destination.txt')->visibility());
+            $this->assertTrue($adapter->has('source.txt'));
+            $this->assertTrue($adapter->has('destination.txt'));
+            $this->assertEquals('public', $adapter->getVisibility('destination.txt')['visibility']);
             $this->assertEquals('contents to be copied', $adapter->read('destination.txt'));
         });
     }
@@ -541,14 +524,14 @@ abstract class FilesystemAdapterTestCase extends TestCase
             $adapter->write(
                 'source.txt',
                 'contents to be copied',
-                new Config([Config::OPTION_VISIBILITY => Visibility::PUBLIC])
+                new Config(['visibility' => 'public'])
             );
 
-            $adapter->copy('source.txt', 'destination.txt', new Config());
+            $adapter->copy('source.txt', 'destination.txt');
 
-            $this->assertTrue($adapter->fileExists('source.txt'));
-            $this->assertTrue($adapter->fileExists('destination.txt'));
-            $this->assertEquals(Visibility::PUBLIC, $adapter->visibility('destination.txt')->visibility());
+            $this->assertTrue($adapter->has('source.txt'));
+            $this->assertTrue($adapter->has('destination.txt'));
+            $this->assertEquals('public', $adapter->getVisibility('destination.txt')['visibility']);
             $this->assertEquals('contents to be copied', $adapter->read('destination.txt'));
         });
     }
@@ -563,18 +546,18 @@ abstract class FilesystemAdapterTestCase extends TestCase
             $adapter->write(
                 'source.txt',
                 'contents to be copied',
-                new Config([Config::OPTION_VISIBILITY => Visibility::PUBLIC])
+                new Config(['visibility' => 'public'])
             );
-            $adapter->move('source.txt', 'destination.txt', new Config());
+            $adapter->rename('source.txt', 'destination.txt');
             $this->assertFalse(
-                $adapter->fileExists('source.txt'),
+                $adapter->has('source.txt'),
                 'After moving a file should no longer exist in the original location.'
             );
             $this->assertTrue(
-                $adapter->fileExists('destination.txt'),
+                $adapter->has('destination.txt'),
                 'After moving, a file should be present at the new location.'
             );
-            $this->assertEquals(Visibility::PUBLIC, $adapter->visibility('destination.txt')->visibility());
+            $this->assertEquals('public', $adapter->getVisibility('destination.txt')['visibility']);
             $this->assertEquals('contents to be copied', $adapter->read('destination.txt'));
         });
     }
@@ -584,10 +567,10 @@ abstract class FilesystemAdapterTestCase extends TestCase
      */
     public function reading_a_file_that_does_not_exist(): void
     {
-        $this->expectException(UnableToReadFile::class);
-
         $this->runScenario(function () {
-            $this->adapter()->read('path.txt');
+            $content = $this->adapter()->read('path.txt');
+
+            $this->assertFalse($content);
         });
     }
 
@@ -596,10 +579,10 @@ abstract class FilesystemAdapterTestCase extends TestCase
      */
     public function moving_a_file_that_does_not_exist(): void
     {
-        $this->expectException(UnableToMoveFile::class);
-
         $this->runScenario(function () {
-            $this->adapter()->move('source.txt', 'destination.txt', new Config());
+            $result = $this->adapter()->rename('source.txt', 'destination.txt');
+
+            $this->assertFalse($result);
         });
     }
 
@@ -611,7 +594,7 @@ abstract class FilesystemAdapterTestCase extends TestCase
         $adapter = $this->adapter();
 
         $adapter->delete('path.txt');
-        $fileExists = $adapter->fileExists('path.txt');
+        $fileExists = $adapter->has('path.txt');
 
         $this->assertFalse($fileExists);
     }
@@ -623,9 +606,9 @@ abstract class FilesystemAdapterTestCase extends TestCase
     {
         $adapter = $this->adapter();
 
-        $fileExistsBefore = $adapter->fileExists('some/path.txt');
+        $fileExistsBefore = $adapter->has('some/path.txt');
         $adapter->write('some/path.txt', 'contents', new Config());
-        $fileExistsAfter = $adapter->fileExists('some/path.txt');
+        $fileExistsAfter = $adapter->has('some/path.txt');
 
         $this->assertFalse($fileExistsBefore);
         $this->assertTrue($fileExistsAfter);
@@ -640,12 +623,12 @@ abstract class FilesystemAdapterTestCase extends TestCase
             $adapter = $this->adapter();
             $adapter->write('path.txt', 'contents', new Config());
 
-            $attributes = $adapter->lastModified('path.txt');
+            $attributes = $adapter->getTimestamp('path.txt');
 
-            $this->assertInstanceOf(FileAttributes::class, $attributes);
-            $this->assertIsInt($attributes->lastModified());
-            $this->assertTrue($attributes->lastModified() > time() - 30);
-            $this->assertTrue($attributes->lastModified() < time() + 30);
+            $this->assertIsArray($attributes);
+            $this->assertIsInt($attributes['timestamp']);
+            $this->assertTrue($attributes['timestamp'] > time() - 30);
+            $this->assertTrue($attributes['timestamp'] < time() + 30);
         });
     }
 
@@ -654,9 +637,8 @@ abstract class FilesystemAdapterTestCase extends TestCase
      */
     public function failing_to_read_a_non_existing_file_into_a_stream(): void
     {
-        $this->expectException(UnableToReadFile::class);
-
-        $this->adapter()->readStream('something.txt');
+        $result = $this->adapter()->readStream('something.txt');
+        $this->assertFalse($result);
     }
 
     /**
@@ -664,9 +646,8 @@ abstract class FilesystemAdapterTestCase extends TestCase
      */
     public function failing_to_read_a_non_existing_file(): void
     {
-        $this->expectException(UnableToReadFile::class);
-
-        $this->adapter()->readStream('something.txt');
+        $result = $this->adapter()->readStream('something.txt');
+        $this->assertFalse($result);
     }
 
     /**
@@ -677,17 +658,16 @@ abstract class FilesystemAdapterTestCase extends TestCase
         $this->runScenario(function () {
             $adapter = $this->adapter();
 
-            $adapter->createDirectory('path', new Config());
+            $adapter->createDir('path', new Config());
 
             // Creating a directory should be idempotent.
-            $adapter->createDirectory('path', new Config());
+            $adapter->createDir('path', new Config());
 
-            $contents = iterator_to_array($adapter->listContents('', false));
+            $contents = $adapter->listContents('', false);
             $this->assertCount(1, $contents, $this->formatIncorrectListingCount($contents));
-            /** @var DirectoryAttributes $directory */
             $directory = $contents[0];
-            $this->assertInstanceOf(DirectoryAttributes::class, $directory);
-            $this->assertEquals('path', $directory->path());
+            $this->assertIsArray($directory);
+            $this->assertEquals('path', $directory['path']);
         });
     }
 
@@ -701,7 +681,7 @@ abstract class FilesystemAdapterTestCase extends TestCase
             $adapter->write('path.txt', 'new contents', new Config());
             $adapter->write('new-path.txt', 'contents', new Config());
 
-            $adapter->copy('path.txt', 'new-path.txt', new Config());
+            $adapter->copy('path.txt', 'new-path.txt');
             $contents = $adapter->read('new-path.txt');
 
             $this->assertEquals('new contents', $contents);
@@ -711,7 +691,7 @@ abstract class FilesystemAdapterTestCase extends TestCase
     protected function assertFileExistsAtPath(string $path): void
     {
         $this->runScenario(function () use ($path) {
-            $fileExists = $this->adapter()->fileExists($path);
+            $fileExists = $this->adapter()->has($path);
             $this->assertTrue($fileExists);
         });
     }
